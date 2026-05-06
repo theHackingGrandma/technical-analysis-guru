@@ -172,38 +172,94 @@ def make_chart_image_figure(df60: pd.DataFrame, ticker: str) -> plt.Figure:
 
 
 def cnn_predict_latest(df: pd.DataFrame, model_path: str = MODEL_PATH):
-    """Returns prediction dict, or {'status': '...'} explaining why
-    inference is unavailable. Single shape so the caller branches once."""
+    """Return prediction dict, or {'status': ..., 'reason': ...} explaining why
+    inference is unavailable. Reasons: 'model_missing', 'data_short',
+    'torch_missing', 'inference_error'. Caller branches on `reason`."""
     if not os.path.exists(model_path):
-        return {'status': f"`{model_path}` not found in current directory. "
-                          f"Place the trained checkpoint here to enable inference."}
+        return {
+            'status': (f"`{model_path}` not found in current directory. "
+                       f"Place the trained checkpoint here to enable inference."),
+            'reason': 'model_missing',
+        }
+    if len(df) < LOOKBACK:
+        return {
+            'status': f'Need ≥ {LOOKBACK} days of data; got {len(df)}.',
+            'reason': 'data_short',
+        }
     try:
         import torch
         from train_cnn import ChartCNNv2  # noqa: F401
+
+        window = df.iloc[-LOOKBACK:][['Open', 'High', 'Low', 'Close', 'Volume']]
+        img = make_candlestick_image(window).astype(np.float32) / 255.0
+
+        device = torch.device('cpu')
+        model = ChartCNNv2(in_ch=3, h=96, w=180)
+        state = torch.load(model_path, map_location=device, weights_only=True)
+        model.load_state_dict(state)
+        model.eval()
+        with torch.no_grad():
+            x = torch.from_numpy(img).unsqueeze(0)
+            logits = model(x)
+            probs = torch.softmax(logits, dim=1)[0]
+        return {
+            'prob_down':    float(probs[0]),
+            'prob_up':      float(probs[1]),
+            'window_start': df.index[-LOOKBACK],
+            'window_end':   df.index[-1],
+        }
     except ImportError:
-        return {'status': "PyTorch not installed in this environment — "
-                          "install with `pip install torch` (CPU-only is fine)."}
-    if len(df) < LOOKBACK:
-        return {'status': f'Need ≥ {LOOKBACK} days of data; got {len(df)}.'}
+        return {
+            'status': 'PyTorch not installed in this environment.',
+            'reason': 'torch_missing',
+        }
+    except Exception as e:
+        return {
+            'status': f'CNN inference failed: {e}',
+            'reason': 'inference_error',
+        }
 
-    window = df.iloc[-LOOKBACK:][['Open', 'High', 'Low', 'Close', 'Volume']]
-    img = make_candlestick_image(window).astype(np.float32) / 255.0
 
-    device = torch.device('cpu')
-    model = ChartCNNv2(in_ch=3, h=96, w=180)
-    state = torch.load(model_path, map_location=device, weights_only=True)
-    model.load_state_dict(state)
-    model.eval()
-    with torch.no_grad():
-        x = torch.from_numpy(img).unsqueeze(0)
-        logits = model(x)
-        probs = torch.softmax(logits, dim=1)[0]
-    return {
-        'prob_down': float(probs[0]),
-        'prob_up':   float(probs[1]),
-        'window_start': df.index[-LOOKBACK],
-        'window_end':   df.index[-1],
-    }
+# Offline CNN test-set numbers (from the cluster training run). Surfaced when
+# torch can't be loaded — e.g. on the Streamlit Cloud deploy where the torch
+# wheel exceeds the dependency-size budget.
+CNN_OFFLINE_RESULTS = {
+    'train_n':               581_008,
+    'val_n':                  96_938,
+    'test_n':                424_698,
+    'test_accuracy':         0.520,
+    'baseline_accuracy':     0.525,
+    'auc_roc':               0.512,
+    'long_short_sharpe_net': -7.42,
+}
+
+
+def render_cnn_offline_card():
+    """Display the offline CNN summary used when live inference is disabled."""
+    st.markdown("#### CNN inference (offline result)")
+    st.info(
+        "Live CNN inference is disabled in this hosted environment due to "
+        "PyTorch dependency size. The CNN was trained on top-1000 CRSP "
+        f"common stocks ({CNN_OFFLINE_RESULTS['train_n']:,} train images, "
+        f"{CNN_OFFLINE_RESULTS['val_n']:,} val, "
+        f"{CNN_OFFLINE_RESULTS['test_n']:,} test) at 96×180×3 candlestick "
+        "format. Test set results below were computed offline."
+    )
+    cols = st.columns(3)
+    cols[0].metric(
+        "Test accuracy",
+        f"{CNN_OFFLINE_RESULTS['test_accuracy']:.1%}",
+        f"vs {CNN_OFFLINE_RESULTS['baseline_accuracy']:.1%} baseline",
+        delta_color='off',
+    )
+    cols[1].metric("AUC-ROC", f"{CNN_OFFLINE_RESULTS['auc_roc']:.3f}")
+    cols[2].metric("Long-short Sharpe (net)",
+                   f"{CNN_OFFLINE_RESULTS['long_short_sharpe_net']:.2f}")
+    st.markdown(
+        "<i>Conclusion: the CNN extracts less out-of-sample signal than the "
+        "top 7 LMW patterns. See the report for full analysis.</i>",
+        unsafe_allow_html=True,
+    )
 
 
 def make_price_with_patterns(df: pd.DataFrame, hits: pd.DataFrame,
@@ -443,7 +499,10 @@ def main():
     st.subheader("CNN prediction — next 5 trading days")
     res = cnn_predict_latest(df, MODEL_PATH)
     if 'status' in res:
-        st.info(res['status'])
+        if res.get('reason') == 'torch_missing':
+            render_cnn_offline_card()
+        else:
+            st.info(res['status'])
     else:
         c1, c2, c3 = st.columns(3)
         c1.metric("P(up over 5d)",   f"{res['prob_up']:.1%}")
