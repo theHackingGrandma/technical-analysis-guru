@@ -55,12 +55,30 @@ PATTERN_INFO = {
 }
 
 PATTERN_COLORS = {
-    'HS':   '#C0392B', 'IHS':  '#27AE60',
-    'BTOP': '#E67E22', 'BBOT': '#16A085',
-    'TTOP': '#D35400', 'TBOT': '#1ABC9C',
-    'RTOP': '#8E44AD', 'RBOT': '#3498DB',
-    'DTOP': '#922B21', 'DBOT': '#1E8449',
+    'HS':   '#E74C3C', 'IHS':  '#2ECC71',
+    'BTOP': '#F39C12', 'BBOT': '#1ABC9C',
+    'TTOP': '#FF6B6B', 'TBOT': '#48DBFB',
+    'RTOP': '#9B59B6', 'RBOT': '#5DADE2',
+    'DTOP': '#FF7979', 'DBOT': '#26C281',
 }
+
+TOP_PATTERNS = {'HS', 'DTOP', 'RTOP', 'BTOP', 'TTOP'}     # bearish-side patterns
+BOT_PATTERNS = {'IHS', 'DBOT', 'RBOT', 'BBOT', 'TBOT'}    # bullish-side patterns
+
+DARK_BG    = '#0E1117'   # Streamlit default dark bg
+DARK_PANEL = '#161A22'
+DARK_FG    = '#E0E0E0'
+DARK_GRID  = '#2C313A'
+DARK_AXIS  = '#5A6068'
+
+EXAMPLE_TICKERS = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'GOOGL']
+GITHUB_REPO = 'github.com/USERNAME/REPO_NAME'  # update before publishing
+COURSE_TAG  = '15.C51 Spring 2026'
+CNN_DISCLAIMER = (
+    "CNN test accuracy is 52% out-of-sample, only marginally above the "
+    "52.5% majority-class baseline. Treat probabilities as model output, "
+    "not calibrated forecasts."
+)
 
 plt.rcParams.update({
     'font.family':       'serif',
@@ -71,6 +89,19 @@ plt.rcParams.update({
     'grid.alpha':        0.25,
     'grid.linewidth':    0.5,
 })
+
+
+def _apply_dark_style(fig: plt.Figure, ax: plt.Axes):
+    """Match the Streamlit dark theme — dark bg, light gridlines + text."""
+    fig.patch.set_facecolor(DARK_BG)
+    ax.set_facecolor(DARK_PANEL)
+    ax.tick_params(colors=DARK_FG, which='both')
+    for spine in ax.spines.values():
+        spine.set_color(DARK_AXIS)
+    ax.grid(color=DARK_GRID, alpha=0.9, linewidth=0.5)
+    ax.title.set_color(DARK_FG)
+    ax.xaxis.label.set_color(DARK_FG)
+    ax.yaxis.label.set_color(DARK_FG)
 
 
 # ---------------------------------------------------------------------------
@@ -122,21 +153,20 @@ def render_chart_image(df60: pd.DataFrame) -> np.ndarray:
 
 
 def make_chart_image_figure(df60: pd.DataFrame, ticker: str) -> plt.Figure:
-    """Wrap the 96x180 chart image in a matplotlib figure that matches the
-    price chart's dimensions / typography for a unified look."""
+    """Wrap the 96×180 chart image in a matplotlib figure matching the price
+    chart's dimensions / typography. Source image is upscaled with hard pixel
+    boundaries (np.repeat) so the model's input grid is visible at display
+    size, even after Streamlit re-rasterizes."""
     img = render_chart_image(df60)
-    fig, ax = plt.subplots(figsize=(11, 4.5))
-    ax.imshow(img, aspect='auto', interpolation='nearest')
-    ax.set_xticks([])
-    ax.set_yticks([])
+    img_big = np.repeat(np.repeat(img, 6, axis=0), 6, axis=1)  # 576×1080
+    fig, ax = plt.subplots(figsize=(11, 4.5), dpi=140)
+    _apply_dark_style(fig, ax)
+    ax.imshow(img_big, aspect='auto', interpolation='nearest')
+    ax.set_xticks([]); ax.set_yticks([])
     ax.set_title(f"{ticker} — last {LOOKBACK} days as 3-channel CNN input "
-                 f"image (96×180)", fontweight='bold')
+                 f"image  (96 × 180, upscaled 6×)", fontweight='bold')
     ax.set_xlabel("R = candles  ·  G = 20-day moving average  ·  B = volume",
-                  fontsize=9, color='#555')
-    for spine in ax.spines.values():
-        spine.set_visible(True)
-        spine.set_color('#999')
-        spine.set_linewidth(0.6)
+                  fontsize=9, color=DARK_AXIS)
     fig.tight_layout()
     return fig
 
@@ -178,24 +208,68 @@ def cnn_predict_latest(df: pd.DataFrame, model_path: str = MODEL_PATH):
 
 def make_price_with_patterns(df: pd.DataFrame, hits: pd.DataFrame,
                              ticker: str) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(11, 4.5))
-    ax.plot(df.index, df['Close'], color='#2C3E50', lw=1.3)
+    """Price line with scatter markers ON the line at completion dates,
+    triangle-down for top patterns and triangle-up for bottom patterns.
+    Annotates only the most recent ~5 detections to keep things readable."""
+    fig, ax = plt.subplots(figsize=(11, 4.5), dpi=140)
+    _apply_dark_style(fig, ax)
+    ax.plot(df.index, df['Close'], color='#FAFAFA', lw=1.3, zorder=2)
 
     if not hits.empty:
         seen = set()
         for _, row in hits.iterrows():
             d = pd.to_datetime(row['date'])
             pat = row['pattern_type']
-            color = PATTERN_COLORS.get(pat, 'gray')
+            if d not in df.index:
+                continue
+            price = float(df.loc[d, 'Close'])
+            color = PATTERN_COLORS.get(pat, '#CCC')
+            marker = 'v' if pat in TOP_PATTERNS else '^'
+            offset_dir = +1 if pat in TOP_PATTERNS else -1
+            offset_y = price * 0.012 * offset_dir
             label = pat if pat not in seen else None
             seen.add(pat)
-            ax.axvline(d, color=color, alpha=0.30, lw=1.1, label=label)
+            ax.scatter(d, price + offset_y,
+                       marker=marker, s=70, color=color,
+                       edgecolor=DARK_BG, linewidth=0.6,
+                       label=label, zorder=4)
 
-    ax.set_title(f"{ticker} — close with LMW pattern completion dates",
-                 fontweight='bold')
+        # Annotate the most-recent detection of each unique pattern type
+        # (cap at 5) so labels don't stack when consecutive same-type hits
+        # cluster within a few days.
+        recent_by_type = (
+            hits.assign(date=pd.to_datetime(hits['date']))
+                .sort_values('date')
+                .groupby('pattern_type').tail(1)     # latest per type
+                .sort_values('date').tail(5)          # latest 5 of those
+        )
+        for _, row in recent_by_type.iterrows():
+            d = pd.to_datetime(row['date'])
+            pat = row['pattern_type']
+            if d not in df.index:
+                continue
+            price = float(df.loc[d, 'Close'])
+            offset_dir = +1 if pat in TOP_PATTERNS else -1
+            ax.annotate(
+                pat,
+                xy=(d, price + price * 0.012 * offset_dir),
+                xytext=(0, 14 * offset_dir),
+                textcoords='offset points',
+                fontsize=8.5, color=PATTERN_COLORS.get(pat, '#CCC'),
+                fontweight='bold',
+                ha='center',
+                va='bottom' if offset_dir > 0 else 'top',
+                zorder=5,
+            )
+
+    ax.set_title(f"{ticker} — close with LMW pattern completions",
+                 fontweight='bold', fontsize=12)
     ax.set_ylabel('Price ($)')
     if not hits.empty:
-        ax.legend(ncol=5, fontsize=8, loc='upper left', frameon=False)
+        leg = ax.legend(ncol=5, fontsize=8, loc='upper left',
+                        frameon=False, labelcolor=DARK_FG)
+        for text in leg.get_texts():
+            text.set_color(DARK_FG)
     fig.autofmt_xdate()
     fig.tight_layout()
     return fig
@@ -235,9 +309,24 @@ def main():
     st.title("Chart Pattern Detector — LMW (2000) + CNN")
     st.caption("15.C51 demo · Lo–Mamaysky–Wang smoothing + ChartCNNv2 inference")
 
+    if 'ticker_input' not in st.session_state:
+        st.session_state['ticker_input'] = 'AAPL'
+
+    def _set_ticker(t):
+        st.session_state['ticker_input'] = t
+
     with st.sidebar:
         st.header("Inputs")
-        ticker = st.text_input("Ticker symbol", value="AAPL").upper().strip()
+        st.caption("Quick picks")
+        chip_cols = st.columns(len(EXAMPLE_TICKERS))
+        for i, t in enumerate(EXAMPLE_TICKERS):
+            chip_cols[i].button(
+                t, key=f'chip_{t}',
+                use_container_width=True,
+                on_click=_set_ticker, args=(t,),
+            )
+        raw_ticker = st.text_input("Ticker symbol", key='ticker_input')
+        ticker = (raw_ticker or '').upper().strip()
         end_default = date.today()
         start_default = end_default - timedelta(days=180)  # ~125 trading days
         c1, c2 = st.columns(2)
@@ -289,6 +378,21 @@ def main():
     with st.spinner("Scanning for LMW patterns..."):
         hits = detect_patterns(df)
 
+    # ---- Summary box: temporal context for the detection count
+    n_hits = len(hits)
+    n_days = len(df)
+    months = max(n_days / 21.0, 1e-6)  # ~21 trading days/month
+    rate = n_hits / months
+    if n_hits:
+        most_common_code = hits['pattern_type'].value_counts().idxmax()
+        most_common_name = PATTERN_INFO.get(most_common_code, (most_common_code, ''))[0]
+        st.success(
+            f"**{n_hits}** patterns detected over **{n_days}** trading days "
+            f"(~{rate:.1f}/month). Most common: **{most_common_code}** — {most_common_name}."
+        )
+    else:
+        st.info(f"No LMW patterns detected in {n_days} trading days.")
+
     # ---- Stacked figures: same width, same matplotlib style
     st.markdown("")  # spacer
     st.markdown("### Price history with detected pattern completions")
@@ -304,26 +408,35 @@ def main():
     else:
         st.info(f"Need ≥ {LOOKBACK} days for the chart image.")
 
-    # ---- Pattern breakdown
+    # ---- Pattern breakdown (only patterns that fired, sorted desc)
     st.subheader("Pattern breakdown")
     if hits.empty:
         st.info("No LMW patterns detected in this window.")
     else:
-        counts = hits['pattern_type'].value_counts().reindex(PATTERN_NAMES,
-                                                             fill_value=0)
-        cols = st.columns(5)
+        counts = hits['pattern_type'].value_counts().sort_values(ascending=False)
+        n_cards = len(counts)
+        cols = st.columns(min(n_cards, 5))
         for i, (pat, n) in enumerate(counts.items()):
-            cols[i % 5].metric(pat, int(n))
+            cols[i % len(cols)].metric(pat, int(n))
 
-        st.markdown(f"**Total detections: {len(hits)}**")
-        view = hits.copy()
+        st.markdown(f"**All {len(hits)} detections**")
+        all_types = list(counts.index)
+        selected = st.multiselect(
+            "Filter by pattern type",
+            options=all_types, default=all_types,
+            key='pattern_filter',
+        )
+        view = hits[hits['pattern_type'].isin(selected)].copy()
         view['date'] = pd.to_datetime(view['date']).dt.date
         view['fwd_return_5d'] = view['fwd_return_5d'].apply(
             lambda x: f"{x:+.2%}" if pd.notna(x) else "—"
         )
         view = view[['date', 'pattern_type', 'fwd_return_5d']]
-        st.dataframe(view.sort_values('date', ascending=False),
-                     use_container_width=True, hide_index=True)
+        if view.empty:
+            st.caption("No detections match the current filter.")
+        else:
+            st.dataframe(view.sort_values('date', ascending=False),
+                         use_container_width=True, hide_index=True)
 
     # ---- CNN prediction
     st.divider()
@@ -337,9 +450,19 @@ def main():
         c2.metric("P(down over 5d)", f"{res['prob_down']:.1%}")
         c3.write(f"**Window:**  \n{res['window_start'].date()} → "
                  f"{res['window_end'].date()}")
+        st.caption(CNN_DISCLAIMER)
 
     st.divider()
     _glossary()
+
+    # ---- Footer
+    st.markdown(
+        f"<div style='text-align:center; color:#5A6068; font-size:0.85em; "
+        f"padding-top:1em;'>"
+        f"Source: <code>{GITHUB_REPO}</code>  ·  {COURSE_TAG}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == '__main__':
